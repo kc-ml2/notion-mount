@@ -18,6 +18,14 @@ class RemoteDocumentMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class SyncProgress:
+    phase: str
+    current: int
+    total: int | None = None
+    name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class DocumentState:
     notion_id: str
     parent_id: str | None

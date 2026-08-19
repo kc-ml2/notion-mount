@@ -1,6 +1,7 @@
+from collections.abc import Callable
 from pathlib import Path
 
-from notion_mount.models import ChangeType, RemoteDocumentMetadata
+from notion_mount.models import ChangeType, RemoteDocumentMetadata, SyncProgress
 from notion_mount.state import StateStore
 from notion_mount.storage import LocalStorage
 from notion_mount.sync import SyncEngine
@@ -14,7 +15,11 @@ class FakeBackend:
         self.bodies = bodies or {document.notion_id: "Hello" for document in documents}
         self.fetches: list[str] = []
 
-    def scan(self, root_page_id: str) -> list[RemoteDocumentMetadata]:
+    def scan(
+        self,
+        root_page_id: str,
+        progress: Callable[[SyncProgress], None] | None = None,
+    ) -> list[RemoteDocumentMetadata]:
         assert root_page_id == "root"
         return self.documents
 
@@ -81,6 +86,43 @@ def test_last_edited_time_change_fetches_body(tmp_path: Path) -> None:
         assert len(result.modified) == 1
         assert backend.fetches == ["page-1"]
         assert "Updated" in (tmp_path / "Projects/Arbiter.md").read_text()
+
+
+def test_interrupted_sync_commits_completed_pages_and_resumes(tmp_path: Path) -> None:
+    second = RemoteDocumentMetadata(
+        notion_id="page-2",
+        parent_id="db-1",
+        name="Chatbot",
+        last_edited_time="2026-01-01T00:00:00Z",
+        ancestors=("Projects",),
+    )
+    backend = FakeBackend(
+        [document(), second], {"page-1": "First", "page-2": "Second"}
+    )
+    with StateStore(tmp_path / ".notion-mount/state.db") as state:
+        engine = SyncEngine(backend, state, LocalStorage(tmp_path))
+
+        def interrupt(progress: SyncProgress) -> None:
+            if progress.phase == "fetch" and progress.current == 2:
+                raise KeyboardInterrupt
+
+        try:
+            engine.sync("root", progress=interrupt)
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("sync was not interrupted")
+
+        assert set(state.all()) == {"page-1"}
+        assert (tmp_path / "Projects/Arbiter.md").exists()
+        backend.fetches.clear()
+
+        result = engine.sync("root")
+
+        assert backend.fetches == ["page-2"]
+        assert len(result.added) == 1
+        assert result.unchanged == 1
+        assert set(state.all()) == {"page-1", "page-2"}
 
 
 def test_duplicate_paths_are_disambiguated(tmp_path: Path) -> None:

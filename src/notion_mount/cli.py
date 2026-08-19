@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from .config import Config, initialize
+from .models import SyncProgress
 from .mount import mount_readonly
 from .notion import NotionClientBackend
 from .state import StateStore
@@ -27,6 +28,17 @@ def parser() -> argparse.ArgumentParser:
     return root
 
 
+def _print_progress(progress: SyncProgress) -> None:
+    if progress.phase == "scan":
+        print(f"\rScanning metadata... {progress.current} pages", end="", flush=True)
+        return
+    print(
+        f"\rFetching changed pages... [{progress.current}/{progress.total}] {progress.name or ''}",
+        end="",
+        flush=True,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
@@ -39,8 +51,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "sync":
             backend = NotionClientBackend(config.token)
             print("Scanning metadata and planning synchronization...", flush=True)
-            with StateStore(config.state_path) as state:
-                result = SyncEngine(backend, state, LocalStorage(config.workspace)).sync(config.root_page_id)
+            try:
+                with StateStore(config.state_path) as state:
+                    result = SyncEngine(backend, state, LocalStorage(config.workspace)).sync(
+                        config.root_page_id, progress=_print_progress
+                    )
+            except KeyboardInterrupt:
+                print("\nSync interrupted. Completed pages were saved; run sync again to resume.")
+                return 130
+            print("\n", end="")
             print(
                 f"Sync complete: {len(result.added)} added, {len(result.modified)} modified, "
                 f"{len(result.deleted)} deleted, {result.unchanged} unchanged"

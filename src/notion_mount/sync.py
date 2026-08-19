@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
@@ -10,6 +11,7 @@ from .models import (
     DocumentChange,
     DocumentState,
     RemoteDocumentMetadata,
+    SyncProgress,
     SyncResult,
 )
 from .state import StateStore
@@ -22,10 +24,14 @@ class SyncEngine:
         self.state = state
         self.storage = storage
 
-    def sync(self, root_page_id: str) -> SyncResult:
+    def sync(
+        self,
+        root_page_id: str,
+        progress: Callable[[SyncProgress], None] | None = None,
+    ) -> SyncResult:
         # Phase 1: scan only hierarchy and metadata. Page bodies are deliberately
         # excluded so unchanged pages do not incur block API calls or conversion.
-        documents = self.backend.scan(root_page_id)
+        documents = self.backend.scan(root_page_id, progress=progress)
         ids = [document.notion_id for document in documents]
         if len(ids) != len(set(ids)):
             raise ValueError("Backend returned duplicate Notion page IDs")
@@ -61,8 +67,12 @@ class SyncEngine:
             planned.append((document, path, path_string, old))
 
         # Phase 3: fetch and convert only pages selected by the plan, then apply.
-        now = datetime.now(UTC).isoformat()
-        for document, path, path_string, old in planned:
+        # Each completed document is committed independently so interruption can
+        # resume from durable state on the next run.
+        total = len(planned)
+        for index, (document, path, path_string, old) in enumerate(planned, 1):
+            if progress:
+                progress(SyncProgress("fetch", index, total, document.name))
             body = self.backend.fetch_markdown(document.notion_id)
             content = render_markdown(
                 notion_id=document.notion_id,
@@ -82,9 +92,10 @@ class SyncEngine:
                 local_path=path_string,
                 last_edited_time=document.last_edited_time,
                 content_hash=digest,
-                sync_time=now,
+                sync_time=datetime.now(UTC).isoformat(),
             )
             self.state.upsert(state)
+            self.state.commit()
             change_type = ChangeType.MODIFIED if old else ChangeType.ADDED
             change = DocumentChange(document.notion_id, f"/{path_string}", change_type)
             (result.modified if old else result.added).append(change)
@@ -94,7 +105,7 @@ class SyncEngine:
                 continue
             self.storage.delete(old.local_path)
             self.state.delete(notion_id)
+            self.state.commit()
             result.deleted.append(DocumentChange(notion_id, f"/{old.local_path}", ChangeType.DELETED))
 
-        self.state.commit()
         return result

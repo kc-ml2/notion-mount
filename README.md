@@ -147,6 +147,8 @@ Every `sync` runs in three internal phases:
 3. Apply  → fetch and convert only added or modified page bodies
 ```
 
+The CLI reports discovered pages during scanning and shows `[current/total]` while fetching changed bodies. Each completed document is committed to SQLite immediately. If the process is interrupted with `Ctrl+C`, rerunning `notion-mount sync` skips completed documents and resumes the remaining work.
+
 The metadata scan still scales with the number of pages and database rows because a complete inventory is required to detect deletions. However, unchanged pages do not incur block downloads or `notion-to-md-py` conversion. The initial sync fetches every body because all discovered pages are new; subsequent syncs use `last_edited_time` and projected paths to select the work set.
 
 ## Read-only behavior
