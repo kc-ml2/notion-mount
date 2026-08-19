@@ -22,6 +22,7 @@ class NotionClientBackend:
         *,
         requests_per_second: float = 2.5,
         max_retries: int = 8,
+        retry_forever: bool = False,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -37,6 +38,7 @@ class NotionClientBackend:
         )
         self.requests_per_second = requests_per_second
         self.max_retries = max_retries
+        self.retry_forever = retry_forever
         self._sleep = sleep
         self._clock = clock
         self._last_request_at: float | None = None
@@ -247,26 +249,30 @@ class NotionClientBackend:
         return self.converter.to_markdown_string(blocks).get("parent", "").strip()
 
     def _request(self, method: Any, **kwargs: Any) -> Any:
-        """Apply a global request pace and retry transient API failures."""
-        for attempt in range(self.max_retries + 1):
+        """Apply request pacing and retry only transient API failures."""
+        attempt = 0
+        while True:
             self._throttle()
             try:
                 return method(**kwargs)
             except Exception as error:
                 retry_after = self._retry_delay(error, attempt)
-                if retry_after is None or attempt >= self.max_retries:
+                exhausted = not self.retry_forever and attempt >= self.max_retries
+                if retry_after is None or exhausted:
                     raise
                 response = getattr(error, "response", None)
                 status = getattr(response, "status_code", None)
                 reason = "rate limited" if status == 429 else "temporarily unavailable"
+                attempt += 1
                 self._report(
                     SyncProgress(
-                        "retry", attempt + 1, self.max_retries,
-                        f"{reason}; retrying in {retry_after:.1f}s",
+                        "retry",
+                        attempt,
+                        None if self.retry_forever else self.max_retries,
+                        f"{reason}; retrying in {retry_after:.1f}s (attempt {attempt})",
                     )
                 )
                 self._sleep(retry_after)
-        raise RuntimeError("unreachable")
 
     def _throttle(self) -> None:
         if self.requests_per_second <= 0:
@@ -281,9 +287,15 @@ class NotionClientBackend:
 
     @staticmethod
     def _retry_delay(error: Exception, attempt: int) -> float | None:
-        # Timeouts have no HTTP response but are transient and safe to retry.
-        if "timeout" in error.__class__.__name__.lower() or "timed out" in str(error).lower():
-            return min(2**attempt, 30) + random.random()
+        # Timeouts and connection/transport failures have no HTTP response but
+        # are transient and safe to retry. Validation and auth errors are not.
+        error_name = error.__class__.__name__.lower()
+        transient_name = any(
+            marker in error_name
+            for marker in ("timeout", "connect", "network", "protocol", "readerror", "writeerror")
+        )
+        if transient_name or "timed out" in str(error).lower():
+            return NotionClientBackend._backoff(attempt)
         response = getattr(error, "response", None)
         status = getattr(response, "status_code", None)
         code = getattr(error, "code", None)
@@ -291,9 +303,19 @@ class NotionClientBackend:
             return None
         retry_after = response.headers.get("retry-after") if response is not None else None
         try:
-            return max(float(retry_after), 0.1) if retry_after else min(2**attempt, 30) + random.random()
+            return (
+                max(float(retry_after), 0.1)
+                if retry_after
+                else NotionClientBackend._backoff(attempt)
+            )
         except (TypeError, ValueError):
-            return min(2**attempt, 30) + random.random()
+            return NotionClientBackend._backoff(attempt)
+
+    @staticmethod
+    def _backoff(attempt: int) -> float:
+        # Cap the exponent as well as the result so an unbounded retry loop
+        # never constructs enormous integers after running for a long time.
+        return min(2 ** min(attempt, 5), 30) + random.random()
 
     @staticmethod
     def _rich_text(items: list[dict[str, Any]]) -> str:
