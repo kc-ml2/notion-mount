@@ -152,6 +152,8 @@ The CLI continuously replaces one progress line with the durable completed count
 
 Interrupted hierarchy traversal is checkpointed in SQLite and automatically resumes on the next `notion-mount sync`. Use `notion-mount sync --restart` to discard a checkpoint and start from the root. A resumed traversal never applies deletions; after it finishes, run sync once more for a full deletion reconciliation.
 
+For unattended initial synchronization, `notion-mount sync --retry-forever` retries only transient failures—timeouts, connection/transport errors, HTTP 429, and retryable 5xx responses—until success or `Ctrl+C`. Authentication, permission, validation, SQLite, conversion, and filesystem failures still stop immediately. The default command retains a finite retry limit.
+
 Requests are paced below Notion's average API limit. HTTP 429 and transient server responses honor `Retry-After` when present and use exponential backoff before retrying. A complete hierarchy traversal is still required to detect deletions, so local deletion is deferred until traversal finishes successfully. An interruption or exhausted retry can never interpret an incomplete scan as remote deletion.
 
 Hierarchy traversal still scales with the number of pages and database rows. However, unchanged pages do not incur body conversion, and changed pages are persisted as they are discovered instead of waiting for a complete upfront scan. The initial sync fetches every body because all discovered pages are new; subsequent syncs use `last_edited_time` and projected paths to select work.

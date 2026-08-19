@@ -25,6 +25,10 @@ def parser() -> argparse.ArgumentParser:
         "--restart", action="store_true",
         help="discard an interrupted traversal checkpoint and start from the root",
     )
+    sync.add_argument(
+        "--retry-forever", action="store_true",
+        help="retry transient Notion API and network failures until success or Ctrl+C",
+    )
     commands.add_parser("status", help="show local synchronization state")
     mount = commands.add_parser("mount", help="mount the mirror read-only")
     mount.add_argument("mountpoint", type=Path)
@@ -70,7 +74,9 @@ def main(argv: list[str] | None = None) -> int:
 
         config = Config.load(args.workspace)
         if args.command == "sync":
-            backend = NotionClientBackend(config.token)
+            backend = NotionClientBackend(
+                config.token, retry_forever=args.retry_forever
+            )
             print("Scanning and synchronizing the Notion hierarchy...", flush=True)
             try:
                 with StateStore(config.state_path) as state:
