@@ -5,7 +5,12 @@ import time
 from collections.abc import Callable, Iterator
 from typing import Any
 
-from .models import RemoteDocumentMetadata, SyncProgress
+from .models import (
+    RemoteDocumentMetadata,
+    SyncProgress,
+    TraversalBatch,
+    TraversalTask,
+)
 
 
 class NotionClientBackend:
@@ -37,6 +42,102 @@ class NotionClientBackend:
         self._last_request_at: float | None = None
         self._progress: Callable[[SyncProgress], None] | None = None
         self._scan_count = 0
+
+    def set_progress(
+        self, progress: Callable[[SyncProgress], None] | None
+    ) -> None:
+        self._progress = progress
+
+    def initial_task(self, root_page_id: str) -> TraversalTask:
+        return TraversalTask("root", root_page_id)
+
+    def process_task(self, task: TraversalTask) -> TraversalBatch:
+        """Process one checkpointable API traversal unit."""
+        if task.kind == "root":
+            root = self._retrieve(task.object_id)
+            if root["object"] == "page":
+                name = self._title(root)
+                return TraversalBatch(
+                    documents=(self._page(root, ()),),
+                    tasks=(TraversalTask("blocks", root["id"], (name,)),),
+                )
+            return TraversalBatch(
+                tasks=(TraversalTask("database", root["id"], (self._title(root),)),)
+            )
+        if task.kind == "blocks":
+            return self._process_blocks_task(task)
+        if task.kind == "database":
+            return self._process_database_task(task)
+        if task.kind == "data_source":
+            return self._process_data_source_task(task)
+        raise ValueError(f"Unknown traversal task kind: {task.kind}")
+
+    def _process_blocks_task(self, task: TraversalTask) -> TraversalBatch:
+        response = self._request(
+            self.client.blocks.children.list,
+            block_id=task.object_id,
+            **({"start_cursor": task.cursor} if task.cursor else {}),
+        )
+        documents: list[RemoteDocumentMetadata] = []
+        tasks: list[TraversalTask] = []
+        for block in response.get("results", []):
+            kind = block.get("type")
+            if kind == "child_page":
+                page = self._request(self.client.pages.retrieve, page_id=block["id"])
+                name = self._title(page)
+                documents.append(self._page(page, task.ancestors))
+                tasks.append(TraversalTask("blocks", page["id"], (*task.ancestors, name)))
+            elif kind == "child_database":
+                database = self._request(
+                    self.client.databases.retrieve, database_id=block["id"]
+                )
+                tasks.append(
+                    TraversalTask(
+                        "database", database["id"],
+                        (*task.ancestors, self._title(database)),
+                    )
+                )
+            elif block.get("has_children"):
+                tasks.append(TraversalTask("blocks", block["id"], task.ancestors))
+        if response.get("has_more"):
+            tasks.append(
+                TraversalTask("blocks", task.object_id, task.ancestors, response["next_cursor"])
+            )
+        return TraversalBatch(tuple(documents), tuple(tasks))
+
+    def _process_database_task(self, task: TraversalTask) -> TraversalBatch:
+        query = getattr(self.client.databases, "query", None)
+        if query is not None:
+            return self._query_pages(query, "database_id", task)
+        database = self._request(
+            self.client.databases.retrieve, database_id=task.object_id
+        )
+        return TraversalBatch(
+            tasks=tuple(
+                TraversalTask("data_source", source["id"], task.ancestors)
+                for source in database.get("data_sources", [])
+            )
+        )
+
+    def _process_data_source_task(self, task: TraversalTask) -> TraversalBatch:
+        return self._query_pages(self.client.data_sources.query, "data_source_id", task)
+
+    def _query_pages(self, method: Any, id_parameter: str, task: TraversalTask) -> TraversalBatch:
+        kwargs = {id_parameter: task.object_id}
+        if task.cursor:
+            kwargs["start_cursor"] = task.cursor
+        response = self._request(method, **kwargs)
+        documents: list[RemoteDocumentMetadata] = []
+        tasks: list[TraversalTask] = []
+        for page in response.get("results", []):
+            name = self._title(page)
+            documents.append(self._page(page, task.ancestors))
+            tasks.append(TraversalTask("blocks", page["id"], (*task.ancestors, name)))
+        if response.get("has_more"):
+            tasks.append(
+                TraversalTask(task.kind, task.object_id, task.ancestors, response["next_cursor"])
+            )
+        return TraversalBatch(tuple(documents), tuple(tasks))
 
     def scan(
         self,
@@ -119,7 +220,6 @@ class NotionClientBackend:
 
     def _page(self, page: dict[str, Any], ancestors: tuple[str, ...]) -> RemoteDocumentMetadata:
         name = self._title(page)
-        self._report_scan(name)
         return RemoteDocumentMetadata(
             notion_id=page["id"],
             parent_id=self._parent_id(page.get("parent", {})),
@@ -181,6 +281,9 @@ class NotionClientBackend:
 
     @staticmethod
     def _retry_delay(error: Exception, attempt: int) -> float | None:
+        # Timeouts have no HTTP response but are transient and safe to retry.
+        if "timeout" in error.__class__.__name__.lower() or "timed out" in str(error).lower():
+            return min(2**attempt, 30) + random.random()
         response = getattr(error, "response", None)
         status = getattr(response, "status_code", None)
         code = getattr(error, "code", None)

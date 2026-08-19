@@ -20,7 +20,11 @@ def parser() -> argparse.ArgumentParser:
     init = commands.add_parser("init", help="initialize a workspace")
     init.add_argument("--root-page-id", required=True, help="root Notion page or database ID")
     init.add_argument("--token-env", default="NOTION_TOKEN", help="environment variable containing API token")
-    commands.add_parser("sync", help="synchronize from Notion")
+    sync = commands.add_parser("sync", help="synchronize from Notion")
+    sync.add_argument(
+        "--restart", action="store_true",
+        help="discard an interrupted traversal checkpoint and start from the root",
+    )
     commands.add_parser("status", help="show local synchronization state")
     mount = commands.add_parser("mount", help="mount the mirror read-only")
     mount.add_argument("mountpoint", type=Path)
@@ -70,8 +74,13 @@ def main(argv: list[str] | None = None) -> int:
             print("Scanning and synchronizing the Notion hierarchy...", flush=True)
             try:
                 with StateStore(config.state_path) as state:
+                    resuming = state.has_session(config.root_page_id) and not args.restart
+                    if resuming:
+                        print("Resuming the interrupted hierarchy traversal...", flush=True)
                     result = SyncEngine(backend, state, LocalStorage(config.workspace)).sync(
-                        config.root_page_id, progress=_print_progress
+                        config.root_page_id,
+                        progress=_print_progress,
+                        restart=args.restart,
                     )
             except KeyboardInterrupt:
                 print("\nSync interrupted. Completed pages were saved; run sync again to resume.")
@@ -83,6 +92,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             for change in [*result.added, *result.modified, *result.deleted]:
                 print(f"{change.change_type.value:8} {change.path}")
+            if result.reconciliation_required:
+                print(
+                    "Resume completed safely. Run sync once more for full deletion reconciliation."
+                )
             return 0
 
         if args.command == "status":
@@ -90,7 +103,8 @@ def main(argv: list[str] | None = None) -> int:
                 documents = state.all().values()
                 latest = max((item.sync_time for item in documents), default="never")
                 count = sum(1 for _ in documents)
-            print(f"Documents: {count}\nLast sync: {latest}")
+                pending = state.pending_task_count(config.root_page_id)
+            print(f"Documents: {count}\nLast sync: {latest}\nPending traversal tasks: {pending}")
             return 0
 
         if args.command == "mount":

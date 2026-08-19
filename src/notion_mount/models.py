@@ -18,6 +18,20 @@ class RemoteDocumentMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class TraversalTask:
+    kind: str
+    object_id: str
+    ancestors: tuple[str, ...] = ()
+    cursor: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TraversalBatch:
+    documents: tuple[RemoteDocumentMetadata, ...] = ()
+    tasks: tuple[TraversalTask, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class SyncProgress:
     phase: str
     current: int
@@ -55,6 +69,8 @@ class SyncResult:
     modified: list[DocumentChange] = field(default_factory=list)
     deleted: list[DocumentChange] = field(default_factory=list)
     unchanged: int = 0
+    resumed: bool = False
+    reconciliation_required: bool = False
 
     @property
     def changed(self) -> bool:

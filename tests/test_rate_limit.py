@@ -5,6 +5,10 @@ from types import SimpleNamespace
 from notion_mount.notion import NotionClientBackend
 
 
+class RequestTimeout(Exception):
+    pass
+
+
 class RateLimitError(Exception):
     def __init__(self, retry_after: str = "2") -> None:
         self.response = SimpleNamespace(
@@ -39,6 +43,23 @@ def test_request_retries_rate_limit_using_retry_after() -> None:
     assert notion._request(request) == {"ok": True}
     assert calls == 2
     assert sleeps == [1.5]
+
+
+def test_request_retries_timeout_without_an_http_response() -> None:
+    sleeps: list[float] = []
+    notion = backend(sleeps)
+    calls = 0
+
+    def request() -> dict[str, bool]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RequestTimeout("Request timed out")
+        return {"ok": True}
+
+    assert notion._request(request) == {"ok": True}
+    assert calls == 2
+    assert len(sleeps) == 1
 
 
 def test_request_does_not_retry_non_transient_errors() -> None:
