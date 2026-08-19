@@ -19,9 +19,9 @@ class FakeBackend:
         self,
         root_page_id: str,
         progress: Callable[[SyncProgress], None] | None = None,
-    ) -> list[RemoteDocumentMetadata]:
+    ):
         assert root_page_id == "root"
-        return self.documents
+        yield from self.documents
 
     def fetch_markdown(self, notion_id: str) -> str:
         self.fetches.append(notion_id)
@@ -123,6 +123,28 @@ def test_interrupted_sync_commits_completed_pages_and_resumes(tmp_path: Path) ->
         assert len(result.added) == 1
         assert result.unchanged == 1
         assert set(state.all()) == {"page-1", "page-2"}
+
+
+def test_interrupted_scan_never_deletes_unseen_documents(tmp_path: Path) -> None:
+    backend = FakeBackend([document()])
+    with StateStore(tmp_path / ".notion-mount/state.db") as state:
+        engine = SyncEngine(backend, state, LocalStorage(tmp_path))
+        engine.sync("root")
+
+        class FailingBackend(FakeBackend):
+            def scan(self, root_page_id: str, progress=None):
+                raise RuntimeError("remote traversal failed")
+                yield
+
+        try:
+            SyncEngine(FailingBackend([]), state, LocalStorage(tmp_path)).sync("root")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("sync did not fail")
+
+        assert set(state.all()) == {"page-1"}
+        assert (tmp_path / "Projects/Arbiter.md").exists()
 
 
 def test_duplicate_paths_are_disambiguated(tmp_path: Path) -> None:

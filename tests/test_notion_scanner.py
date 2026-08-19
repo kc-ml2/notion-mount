@@ -71,9 +71,16 @@ def test_scanner_finds_pages_nested_inside_layout_blocks() -> None:
     backend = object.__new__(NotionClientBackend)
     backend.client = FakeClient()
     backend.converter = FakeConverter()
+    backend.requests_per_second = 0
+    backend.max_retries = 0
+    backend._sleep = lambda _: None
+    backend._clock = lambda: 0.0
+    backend._last_request_at = None
+    backend._progress = None
+    backend._scan_count = 0
     documents = []
 
-    backend._scan_blocks("root", ("Root",), documents)
+    documents.extend(backend._scan_blocks("root", ("Root",)))
 
     assert [document.notion_id for document in documents] == ["nested-page"]
     assert documents[0].ancestors == ("Root",)
