@@ -28,10 +28,16 @@ def parser() -> argparse.ArgumentParser:
     return root
 
 
+_progress_width = 0
+
+
 def _progress_line(message: str) -> None:
-    # Clear the previous line first so a shorter page title cannot leave stale
-    # characters behind. ANSI is intentionally avoided for redirected output.
-    print(f"\r{message:<120}", end="", flush=True)
+    # Pad to the actual previous width so even very long titles are fully
+    # overwritten by a later short title. ANSI is avoided for redirected logs.
+    global _progress_width
+    width = max(len(message), _progress_width)
+    print(f"\r{message:<{width}}", end="", flush=True)
+    _progress_width = len(message)
 
 
 def _print_progress(progress: SyncProgress) -> None:
