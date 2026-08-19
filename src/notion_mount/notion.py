@@ -156,10 +156,13 @@ class NotionClientBackend:
                 retry_after = self._retry_delay(error, attempt)
                 if retry_after is None or attempt >= self.max_retries:
                     raise
+                response = getattr(error, "response", None)
+                status = getattr(response, "status_code", None)
+                reason = "rate limited" if status == 429 else "temporarily unavailable"
                 self._report(
                     SyncProgress(
                         "retry", attempt + 1, self.max_retries,
-                        f"rate limited; retrying in {retry_after:.1f}s",
+                        f"{reason}; retrying in {retry_after:.1f}s",
                     )
                 )
                 self._sleep(retry_after)
