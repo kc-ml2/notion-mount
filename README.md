@@ -148,7 +148,7 @@ Discover page metadata
 → continue into that page's descendants
 ```
 
-The CLI continuously replaces one progress line with the current page name. Each completed document is committed to SQLite immediately. If the process is interrupted with `Ctrl+C`, rerunning `notion-mount sync` skips completed documents and resumes expensive body conversion from the remaining work.
+The CLI continuously replaces one progress line with the durable completed count and current page name, for example `Synced 11 changed pages | 2026-08-10`. Each completed document is committed to SQLite immediately. If the process is interrupted with `Ctrl+C`, rerunning `notion-mount sync` skips completed documents and resumes expensive body conversion from the remaining work.
 
 Requests are paced below Notion's average API limit. HTTP 429 and transient server responses honor `Retry-After` when present and use exponential backoff before retrying. A complete hierarchy traversal is still required to detect deletions, so local deletion is deferred until traversal finishes successfully. An interruption or exhausted retry can never interpret an incomplete scan as remote deletion.
 

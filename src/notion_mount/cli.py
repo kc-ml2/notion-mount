@@ -42,10 +42,11 @@ def _print_progress(progress: SyncProgress) -> None:
             f"Scanning and syncing... {progress.current} pages discovered | {progress.name or ''}"
         )
     else:
-        # The total is intentionally unknown during streaming traversal. The
-        # line is overwritten in place so large workspaces do not flood logs.
+        # Streaming traversal does not know the final total in advance. Report
+        # the durable completed count instead of displaying a misleading `?`.
+        noun = "page" if progress.current == 1 else "pages"
         _progress_line(
-            f"Syncing changed pages... [{progress.current}/?] {progress.name or ''}"
+            f"Synced {progress.current} changed {noun} | {progress.name or ''}"
         )
 
 

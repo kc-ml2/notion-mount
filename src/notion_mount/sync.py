@@ -39,14 +39,17 @@ class SyncEngine:
         result = SyncResult()
         seen: set[str] = set()
         used_paths: dict[str, str] = {}
+        reserved_paths = {state.local_path: notion_id for notion_id, state in previous.items()}
         fetched = 0
 
         for document in self.backend.scan(root_page_id, progress=progress):
             if document.notion_id in seen:
                 raise ValueError(f"Backend returned duplicate Notion page ID: {document.notion_id}")
             seen.add(document.notion_id)
-            path, path_string = self._project(document, used_paths)
             old = previous.get(document.notion_id)
+            path, path_string = self._project(
+                document, old, used_paths, reserved_paths
+            )
             if (
                 old
                 and old.local_path == path_string
@@ -56,10 +59,10 @@ class SyncEngine:
                 result.unchanged += 1
                 continue
 
+            self._apply(document, path, path_string, old)
             fetched += 1
             if progress:
                 progress(SyncProgress("fetch", fetched, name=document.name))
-            self._apply(document, path, path_string, old)
             change_type = ChangeType.MODIFIED if old else ChangeType.ADDED
             change = DocumentChange(document.notion_id, f"/{path_string}", change_type)
             (result.modified if old else result.added).append(change)
@@ -79,16 +82,40 @@ class SyncEngine:
 
     @staticmethod
     def _project(
-        document: RemoteDocumentMetadata, used_paths: dict[str, str]
+        document: RemoteDocumentMetadata,
+        old: DocumentState | None,
+        used_paths: dict[str, str],
+        reserved_paths: dict[str, str],
     ) -> tuple[PurePosixPath, str]:
-        path = projected_path(document.ancestors, document.name)
-        path_string = path.as_posix()
-        owner = used_paths.get(path_string)
-        if owner and owner != document.notion_id:
-            path = path.with_stem(f"{path.stem} ({document.notion_id[:8]})")
-            path_string = path.as_posix()
+        base = projected_path(document.ancestors, document.name)
+        candidates = [base]
+        # Prefix lengths keep common paths readable while still handling the
+        # extremely unlikely case of two IDs sharing the same first 8 chars.
+        for length in (8, 12, len(document.notion_id)):
+            candidate = base.with_stem(f"{base.stem} ({document.notion_id[:length]})")
+            if candidate not in candidates:
+                candidates.append(candidate)
+
+        allowed = {candidate.as_posix() for candidate in candidates}
+        if old and old.local_path in allowed and old.local_path not in used_paths:
+            # Preserve prior ownership regardless of remote traversal order.
+            chosen = PurePosixPath(old.local_path)
+        else:
+            chosen = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if candidate.as_posix() not in used_paths
+                    and reserved_paths.get(candidate.as_posix()) in {None, document.notion_id}
+                ),
+                None,
+            )
+            if chosen is None:
+                raise ValueError(f"Could not allocate a unique path for {document.notion_id}")
+
+        path_string = chosen.as_posix()
         used_paths[path_string] = document.notion_id
-        return path, path_string
+        return chosen, path_string
 
     def _apply(
         self,
