@@ -213,6 +213,99 @@ def test_duplicate_paths_remain_stable_when_traversal_order_changes(tmp_path: Pa
         } == original
 
 
+def test_new_duplicate_cannot_take_reserved_base_path(tmp_path: Path) -> None:
+    backend = FakeBackend([document()], {"page-1": "Original"})
+    with StateStore(tmp_path / ".notion-mount/state.db") as state:
+        engine = SyncEngine(backend, state, LocalStorage(tmp_path))
+        engine.sync("root")
+        newcomer = RemoteDocumentMetadata(
+            notion_id="new-page",
+            parent_id="db-1",
+            name="Arbiter",
+            last_edited_time="2026-01-01T00:00:00Z",
+            ancestors=("Projects",),
+        )
+        backend.documents = [newcomer, document()]
+        backend.bodies["new-page"] = "New"
+
+        engine.sync("root")
+
+        paths = {notion_id: item.local_path for notion_id, item in state.all().items()}
+        assert paths["page-1"] == "Projects/Arbiter.md"
+        assert paths["new-page"] == "Projects/Arbiter (new-page).md"
+
+
+def test_duplicate_id_prefixes_use_a_longer_suffix(tmp_path: Path) -> None:
+    first = RemoteDocumentMetadata(
+        notion_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        parent_id="db-1",
+        name="Same",
+        last_edited_time="2026-01-01T00:00:00Z",
+        ancestors=("Projects",),
+    )
+    second = RemoteDocumentMetadata(
+        notion_id="12345678-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        parent_id="db-1",
+        name="Same",
+        last_edited_time="2026-01-01T00:00:00Z",
+        ancestors=("Projects",),
+    )
+    third = RemoteDocumentMetadata(
+        notion_id="12345678-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        parent_id="db-1",
+        name="Same",
+        last_edited_time="2026-01-01T00:00:00Z",
+        ancestors=("Projects",),
+    )
+    backend = FakeBackend(
+        [first, second, third],
+        {
+            first.notion_id: "First",
+            second.notion_id: "Second",
+            third.notion_id: "Third",
+        },
+    )
+    with StateStore(tmp_path / ".notion-mount/state.db") as state:
+        SyncEngine(backend, state, LocalStorage(tmp_path)).sync("root")
+        paths = {item.local_path for item in state.all().values()}
+
+    assert "Projects/Same.md" in paths
+    assert "Projects/Same (12345678).md" in paths
+    assert "Projects/Same (12345678-bbb).md" in paths
+    assert len(paths) == 3
+
+
+def test_rename_cannot_take_another_documents_reserved_path(tmp_path: Path) -> None:
+    owner = document(name="Owner")
+    moving = RemoteDocumentMetadata(
+        notion_id="moving-page",
+        parent_id="db-1",
+        name="Moving",
+        last_edited_time="2026-01-01T00:00:00Z",
+        ancestors=("Projects",),
+    )
+    backend = FakeBackend(
+        [owner, moving], {"page-1": "Owner", "moving-page": "Moving"}
+    )
+    with StateStore(tmp_path / ".notion-mount/state.db") as state:
+        engine = SyncEngine(backend, state, LocalStorage(tmp_path))
+        engine.sync("root")
+        renamed = RemoteDocumentMetadata(
+            notion_id="moving-page",
+            parent_id="db-1",
+            name="Owner",
+            last_edited_time="2026-01-02T00:00:00Z",
+            ancestors=("Projects",),
+        )
+        backend.documents = [renamed, owner]
+
+        engine.sync("root")
+
+        paths = {notion_id: item.local_path for notion_id, item in state.all().items()}
+        assert paths["page-1"] == "Projects/Owner.md"
+        assert paths["moving-page"] == "Projects/Owner (moving-p).md"
+
+
 def test_duplicate_paths_are_disambiguated(tmp_path: Path) -> None:
     docs = [
         document(),
