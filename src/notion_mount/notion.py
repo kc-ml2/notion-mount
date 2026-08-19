@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Iterator
 
-from .models import RemoteDocumentMetadata
+from .models import RemoteDocumentMetadata, SyncProgress
 
 
 class NotionClientBackend:
@@ -26,10 +27,16 @@ class NotionClientBackend:
             config={"parse_child_pages": False, "convert_images_to_base64": False},
         )
 
-    def scan(self, root_page_id: str) -> list[RemoteDocumentMetadata]:
+    def scan(
+        self,
+        root_page_id: str,
+        progress: Callable[[SyncProgress], None] | None = None,
+    ) -> list[RemoteDocumentMetadata]:
         """Collect the remote inventory without converting page bodies."""
         root = self._retrieve(root_page_id)
         documents: list[RemoteDocumentMetadata] = []
+        self._progress = progress
+        self._scan_count = 0
         if root["object"] == "page":
             root_name = self._title(root)
             documents.append(self._page(root, ()))
@@ -37,6 +44,12 @@ class NotionClientBackend:
         else:
             self._scan_database(root, (self._title(root),), documents)
         return documents
+
+    def _report_scan(self, name: str) -> None:
+        progress = getattr(self, "_progress", None)
+        if progress:
+            self._scan_count = getattr(self, "_scan_count", 0) + 1
+            progress(SyncProgress("scan", self._scan_count, name=name))
 
     def _retrieve(self, object_id: str) -> dict[str, Any]:
         try:
@@ -87,10 +100,12 @@ class NotionClientBackend:
             self._scan_blocks(page["id"], (*ancestors, self._title(page)), output)
 
     def _page(self, page: dict[str, Any], ancestors: tuple[str, ...]) -> RemoteDocumentMetadata:
+        name = self._title(page)
+        self._report_scan(name)
         return RemoteDocumentMetadata(
             notion_id=page["id"],
             parent_id=self._parent_id(page.get("parent", {})),
-            name=self._title(page),
+            name=name,
             last_edited_time=page["last_edited_time"],
             properties=self._properties(page.get("properties", {})),
             ancestors=ancestors,
