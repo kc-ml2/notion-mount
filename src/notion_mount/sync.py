@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 
 from .backend import NotionBackend
-from .models import ChangeType, DocumentChange, DocumentState, SyncResult
+from .models import (
+    ChangeType,
+    DocumentChange,
+    DocumentState,
+    RemoteDocumentMetadata,
+    SyncResult,
+)
 from .state import StateStore
 from .storage import LocalStorage, projected_path, render_markdown
 
@@ -16,16 +23,21 @@ class SyncEngine:
         self.storage = storage
 
     def sync(self, root_page_id: str) -> SyncResult:
+        # Phase 1: scan only hierarchy and metadata. Page bodies are deliberately
+        # excluded so unchanged pages do not incur block API calls or conversion.
         documents = self.backend.scan(root_page_id)
         ids = [document.notion_id for document in documents]
         if len(ids) != len(set(ids)):
             raise ValueError("Backend returned duplicate Notion page IDs")
 
+        # Phase 2: compare the inventory with local state and build the work set.
         previous = self.state.all()
         result = SyncResult()
         seen: set[str] = set()
         used_paths: dict[str, str] = {}
-        now = datetime.now(UTC).isoformat()
+        planned: list[
+            tuple[RemoteDocumentMetadata, PurePosixPath, str, DocumentState | None]
+        ] = []
 
         # Parents normally precede children, but identity rather than traversal order drives sync.
         for document in documents:
@@ -38,26 +50,28 @@ class SyncEngine:
                 path_string = path.as_posix()
             used_paths[path_string] = document.notion_id
 
+            old = previous.get(document.notion_id)
+            if (
+                old
+                and old.local_path == path_string
+                and old.last_edited_time == document.last_edited_time
+            ):
+                result.unchanged += 1
+                continue
+            planned.append((document, path, path_string, old))
+
+        # Phase 3: fetch and convert only pages selected by the plan, then apply.
+        now = datetime.now(UTC).isoformat()
+        for document, path, path_string, old in planned:
+            body = self.backend.fetch_markdown(document.notion_id)
             content = render_markdown(
                 notion_id=document.notion_id,
                 last_edited_time=document.last_edited_time,
                 name=document.name,
                 properties=document.properties,
-                body=document.markdown,
+                body=body,
             )
             digest = hashlib.sha256(content.encode()).hexdigest()
-            old = previous.get(document.notion_id)
-            unchanged = bool(
-                old
-                and old.local_path == path_string
-                and old.last_edited_time == document.last_edited_time
-                and old.content_hash == digest
-            )
-            if unchanged:
-                result.unchanged += 1
-                continue
-
-            # Write first, then remove an obsolete projection after successful replacement.
             self.storage.write(path, content)
             if old and old.local_path != path_string:
                 self.storage.delete(old.local_path)

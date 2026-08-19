@@ -1,4 +1,10 @@
-from .models import ChangeType, DocumentChange, RemoteDocument, SyncResult
+from .models import ChangeType, DocumentChange, RemoteDocumentMetadata, SyncResult
 from .sync import SyncEngine
 
-__all__ = ["ChangeType", "DocumentChange", "RemoteDocument", "SyncEngine", "SyncResult"]
+__all__ = [
+    "ChangeType",
+    "DocumentChange",
+    "RemoteDocumentMetadata",
+    "SyncEngine",
+    "SyncResult",
+]

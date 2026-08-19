@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Iterator
 
-from .models import RemoteDocument
+from .models import RemoteDocumentMetadata
 
 
 class NotionClientBackend:
@@ -26,9 +26,10 @@ class NotionClientBackend:
             config={"parse_child_pages": False, "convert_images_to_base64": False},
         )
 
-    def scan(self, root_page_id: str) -> list[RemoteDocument]:
+    def scan(self, root_page_id: str) -> list[RemoteDocumentMetadata]:
+        """Collect the remote inventory without converting page bodies."""
         root = self._retrieve(root_page_id)
-        documents: list[RemoteDocument] = []
+        documents: list[RemoteDocumentMetadata] = []
         if root["object"] == "page":
             root_name = self._title(root)
             documents.append(self._page(root, ()))
@@ -47,7 +48,7 @@ class NotionClientBackend:
                 raise page_error
 
     def _scan_blocks(
-        self, parent_id: str, ancestors: tuple[str, ...], output: list[RemoteDocument]
+        self, parent_id: str, ancestors: tuple[str, ...], output: list[RemoteDocumentMetadata]
     ) -> None:
         for block in self._paginate(self.client.blocks.children.list, block_id=parent_id):
             block_type = block.get("type")
@@ -58,9 +59,14 @@ class NotionClientBackend:
             elif block_type == "child_database":
                 database = self.client.databases.retrieve(database_id=block["id"])
                 self._scan_database(database, (*ancestors, self._title(database)), output)
+            elif block.get("has_children"):
+                # Structural blocks such as columns, toggles, and synced blocks
+                # can contain child pages/databases. They do not create a
+                # filesystem level, but their descendants must still be found.
+                self._scan_blocks(block["id"], ancestors, output)
 
     def _scan_database(
-        self, database: dict[str, Any], ancestors: tuple[str, ...], output: list[RemoteDocument]
+        self, database: dict[str, Any], ancestors: tuple[str, ...], output: list[RemoteDocumentMetadata]
     ) -> None:
         # Notion API 2025-09-03 moved database queries to data sources. Keep
         # compatibility with both notion-client generations.
@@ -80,16 +86,19 @@ class NotionClientBackend:
             output.append(self._page(page, ancestors))
             self._scan_blocks(page["id"], (*ancestors, self._title(page)), output)
 
-    def _page(self, page: dict[str, Any], ancestors: tuple[str, ...]) -> RemoteDocument:
-        return RemoteDocument(
+    def _page(self, page: dict[str, Any], ancestors: tuple[str, ...]) -> RemoteDocumentMetadata:
+        return RemoteDocumentMetadata(
             notion_id=page["id"],
             parent_id=self._parent_id(page.get("parent", {})),
             name=self._title(page),
             last_edited_time=page["last_edited_time"],
-            markdown=self._blocks_to_markdown(page["id"]),
             properties=self._properties(page.get("properties", {})),
             ancestors=ancestors,
         )
+
+    def fetch_markdown(self, notion_id: str) -> str:
+        """Fetch and convert one changed page body."""
+        return self._blocks_to_markdown(notion_id)
 
     def _blocks_to_markdown(self, page_id: str) -> str:
         blocks = self.converter.page_to_markdown(page_id)

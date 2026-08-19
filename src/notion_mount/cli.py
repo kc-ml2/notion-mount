@@ -38,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
         config = Config.load(args.workspace)
         if args.command == "sync":
             backend = NotionClientBackend(config.token)
+            print("Scanning metadata and planning synchronization...", flush=True)
             with StateStore(config.state_path) as state:
                 result = SyncEngine(backend, state, LocalStorage(config.workspace)).sync(config.root_page_id)
             print(

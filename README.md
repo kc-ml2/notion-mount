@@ -16,6 +16,7 @@ Local files are a materialized view. Editing, renaming, or deleting files does n
 - Converts page blocks with [`notion-to-md-py`](https://pypi.org/project/notion-to-md-py/)
 - Stores page properties in YAML frontmatter
 - Tracks document identity and synchronization state in SQLite
+- Scans metadata first and fetches Markdown bodies only for changed pages
 - Incrementally handles added, modified, renamed, moved, and deleted pages
 - Uses safe path projection and atomic file replacement
 - Provides a read-only FUSE mount
@@ -135,6 +136,18 @@ Use `--workspace PATH` before the subcommand to operate on another workspace:
 ```bash
 notion-mount --workspace ./notion-workspace sync
 ```
+
+## Synchronization model
+
+Every `sync` runs in three internal phases:
+
+```text
+1. Scan   → collect hierarchy and page metadata
+2. Plan   → compare the remote inventory with SQLite state
+3. Apply  → fetch and convert only added or modified page bodies
+```
+
+The metadata scan still scales with the number of pages and database rows because a complete inventory is required to detect deletions. However, unchanged pages do not incur block downloads or `notion-to-md-py` conversion. The initial sync fetches every body because all discovered pages are new; subsequent syncs use `last_edited_time` and projected paths to select the work set.
 
 ## Read-only behavior
 

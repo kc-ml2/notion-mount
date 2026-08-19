@@ -6,14 +6,13 @@ from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
-class RemoteDocument:
-    """A backend-neutral representation of a Notion page."""
+class RemoteDocumentMetadata:
+    """Backend-neutral page metadata collected without Markdown conversion."""
 
     notion_id: str
     parent_id: str | None
     name: str
     last_edited_time: str
-    markdown: str
     properties: dict[str, Any] = field(default_factory=dict)
     ancestors: tuple[str, ...] = ()
 
