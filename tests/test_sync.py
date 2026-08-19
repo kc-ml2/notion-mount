@@ -1,7 +1,12 @@
-from collections.abc import Callable
 from pathlib import Path
 
-from notion_mount.models import ChangeType, RemoteDocumentMetadata, SyncProgress
+from notion_mount.models import (
+    ChangeType,
+    RemoteDocumentMetadata,
+    SyncProgress,
+    TraversalBatch,
+    TraversalTask,
+)
 from notion_mount.state import StateStore
 from notion_mount.storage import LocalStorage
 from notion_mount.sync import SyncEngine
@@ -15,13 +20,15 @@ class FakeBackend:
         self.bodies = bodies or {document.notion_id: "Hello" for document in documents}
         self.fetches: list[str] = []
 
-    def scan(
-        self,
-        root_page_id: str,
-        progress: Callable[[SyncProgress], None] | None = None,
-    ):
+    def set_progress(self, progress) -> None:
+        self.progress = progress
+
+    def initial_task(self, root_page_id: str) -> TraversalTask:
         assert root_page_id == "root"
-        yield from self.documents
+        return TraversalTask("fake", root_page_id)
+
+    def process_task(self, task: TraversalTask) -> TraversalBatch:
+        return TraversalBatch(tuple(self.documents))
 
     def fetch_markdown(self, notion_id: str) -> str:
         self.fetches.append(notion_id)
@@ -161,8 +168,12 @@ def test_interrupted_scan_never_deletes_unseen_documents(tmp_path: Path) -> None
         engine.sync("root")
 
         class FailingBackend(FakeBackend):
-            def scan(self, root_page_id: str, progress=None):
-                yield document(name="Restored Arbiter")
+            def process_task(self, task: TraversalTask) -> TraversalBatch:
+                if task.kind == "fake":
+                    return TraversalBatch(
+                        (document(name="Restored Arbiter"),),
+                        (TraversalTask("fail", "next"),),
+                    )
                 raise RuntimeError("remote traversal failed")
 
         try:
