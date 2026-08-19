@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -53,6 +54,17 @@ class LocalStorage:
         temporary = path.with_name(f".{path.name}.tmp")
         temporary.write_text(content, encoding="utf-8")
         temporary.replace(path)
+
+    def matches_hash(
+        self, relative_path: str | PurePosixPath, expected_hash: str
+    ) -> bool:
+        """Return whether the materialized file exists and matches stored state."""
+        path = self._resolve(PurePosixPath(relative_path))
+        try:
+            content = path.read_bytes()
+        except (FileNotFoundError, IsADirectoryError, OSError):
+            return False
+        return hashlib.sha256(content).hexdigest() == expected_hash
 
     def delete(self, relative_path: str | PurePosixPath) -> None:
         path = self._resolve(PurePosixPath(relative_path))

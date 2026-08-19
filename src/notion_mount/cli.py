@@ -28,22 +28,24 @@ def parser() -> argparse.ArgumentParser:
     return root
 
 
+def _progress_line(message: str) -> None:
+    # Clear the previous line first so a shorter page title cannot leave stale
+    # characters behind. ANSI is intentionally avoided for redirected output.
+    print(f"\r{message:<120}", end="", flush=True)
+
+
 def _print_progress(progress: SyncProgress) -> None:
     if progress.phase == "retry":
-        print(f"\rNotion API {progress.name or 'temporarily unavailable'}", end="", flush=True)
+        _progress_line(f"Notion API {progress.name or 'temporarily unavailable'}")
     elif progress.phase == "scan":
-        print(
-            f"\rScanning and syncing... {progress.current} pages discovered | {progress.name or ''}",
-            end="",
-            flush=True,
+        _progress_line(
+            f"Scanning and syncing... {progress.current} pages discovered | {progress.name or ''}"
         )
     else:
         # The total is intentionally unknown during streaming traversal. The
         # line is overwritten in place so large workspaces do not flood logs.
-        print(
-            f"\rSyncing changed pages... [{progress.current}/?] {progress.name or ''}",
-            end="",
-            flush=True,
+        _progress_line(
+            f"Syncing changed pages... [{progress.current}/?] {progress.name or ''}"
         )
 
 
@@ -90,6 +92,14 @@ def main(argv: list[str] | None = None) -> int:
     except (FileNotFoundError, FileExistsError, RuntimeError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
+    except Exception as error:
+        # notion-client exceptions are intentionally not imported here so the
+        # CLI remains decoupled from a specific SDK exception hierarchy.
+        if error.__class__.__module__.startswith(("notion_client", "httpx")):
+            print(f"\nerror: Notion API request failed: {error}", file=sys.stderr)
+            print("Run sync again to resume from completed pages.", file=sys.stderr)
+            return 1
+        raise
     return 2
 
 

@@ -72,6 +72,28 @@ def test_incremental_sync_fetches_only_changed_bodies_and_deletes(tmp_path: Path
         assert state.all() == {}
 
 
+def test_missing_or_locally_modified_file_is_rematerialized(tmp_path: Path) -> None:
+    backend = FakeBackend([document()])
+    path = tmp_path / "Projects/Arbiter.md"
+    with StateStore(tmp_path / ".notion-mount/state.db") as state:
+        engine = SyncEngine(backend, state, LocalStorage(tmp_path))
+        engine.sync("root")
+
+        path.write_text("locally modified", encoding="utf-8")
+        backend.fetches.clear()
+        modified = engine.sync("root")
+        assert backend.fetches == ["page-1"]
+        assert len(modified.modified) == 1
+        assert "locally modified" not in path.read_text()
+
+        path.unlink()
+        backend.fetches.clear()
+        missing = engine.sync("root")
+        assert backend.fetches == ["page-1"]
+        assert len(missing.modified) == 1
+        assert path.exists()
+
+
 def test_last_edited_time_change_fetches_body(tmp_path: Path) -> None:
     backend = FakeBackend([document()])
     with StateStore(tmp_path / ".notion-mount/state.db") as state:
@@ -126,25 +148,39 @@ def test_interrupted_sync_commits_completed_pages_and_resumes(tmp_path: Path) ->
 
 
 def test_interrupted_scan_never_deletes_unseen_documents(tmp_path: Path) -> None:
-    backend = FakeBackend([document()])
+    unseen = RemoteDocumentMetadata(
+        notion_id="page-2",
+        parent_id="db-1",
+        name="Chatbot",
+        last_edited_time="2026-01-01T00:00:00Z",
+        ancestors=("Projects",),
+    )
+    backend = FakeBackend([unseen], {"page-2": "Second"})
     with StateStore(tmp_path / ".notion-mount/state.db") as state:
         engine = SyncEngine(backend, state, LocalStorage(tmp_path))
         engine.sync("root")
 
         class FailingBackend(FakeBackend):
             def scan(self, root_page_id: str, progress=None):
+                yield document(name="Restored Arbiter")
                 raise RuntimeError("remote traversal failed")
-                yield
 
         try:
-            SyncEngine(FailingBackend([]), state, LocalStorage(tmp_path)).sync("root")
+            SyncEngine(
+                FailingBackend([document()], {"page-1": "First"}),
+                state,
+                LocalStorage(tmp_path),
+            ).sync("root")
         except RuntimeError:
             pass
         else:
             raise AssertionError("sync did not fail")
 
-        assert set(state.all()) == {"page-1"}
-        assert (tmp_path / "Projects/Arbiter.md").exists()
+        # The discovered page is durable, while page-2 was not falsely deleted
+        # merely because traversal failed before it could be seen.
+        assert set(state.all()) == {"page-1", "page-2"}
+        assert (tmp_path / "Projects/Restored Arbiter.md").exists()
+        assert (tmp_path / "Projects/Chatbot.md").exists()
 
 
 def test_duplicate_paths_are_disambiguated(tmp_path: Path) -> None:

@@ -51,6 +51,7 @@ class SyncEngine:
                 old
                 and old.local_path == path_string
                 and old.last_edited_time == document.last_edited_time
+                and self.storage.matches_hash(old.local_path, old.content_hash)
             ):
                 result.unchanged += 1
                 continue
