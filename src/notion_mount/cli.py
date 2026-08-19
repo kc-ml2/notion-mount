@@ -29,14 +29,22 @@ def parser() -> argparse.ArgumentParser:
 
 
 def _print_progress(progress: SyncProgress) -> None:
-    if progress.phase == "scan":
-        print(f"\rScanning metadata... {progress.current} pages", end="", flush=True)
-        return
-    print(
-        f"\rFetching changed pages... [{progress.current}/{progress.total}] {progress.name or ''}",
-        end="",
-        flush=True,
-    )
+    if progress.phase == "retry":
+        print(f"\rNotion API {progress.name or 'temporarily unavailable'}", end="", flush=True)
+    elif progress.phase == "scan":
+        print(
+            f"\rScanning and syncing... {progress.current} pages discovered | {progress.name or ''}",
+            end="",
+            flush=True,
+        )
+    else:
+        # The total is intentionally unknown during streaming traversal. The
+        # line is overwritten in place so large workspaces do not flood logs.
+        print(
+            f"\rSyncing changed pages... [{progress.current}/?] {progress.name or ''}",
+            end="",
+            flush=True,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -50,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         config = Config.load(args.workspace)
         if args.command == "sync":
             backend = NotionClientBackend(config.token)
-            print("Scanning metadata and planning synchronization...", flush=True)
+            print("Scanning and synchronizing the Notion hierarchy...", flush=True)
             try:
                 with StateStore(config.state_path) as state:
                     result = SyncEngine(backend, state, LocalStorage(config.workspace)).sync(

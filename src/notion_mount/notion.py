@@ -1,88 +1,106 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any, Iterator
+import random
+import time
+from collections.abc import Callable, Iterator
+from typing import Any
 
 from .models import RemoteDocumentMetadata, SyncProgress
 
 
 class NotionClientBackend:
-    """Notion backend using notion-sdk-py's synchronous client.
+    """Notion backend using notion-sdk-py's synchronous client."""
 
-    The integration must be shared with the configured root page/database. The
-    scanner recursively follows child pages and databases visible to it.
-    """
-
-    def __init__(self, token: str) -> None:
+    def __init__(
+        self,
+        token: str,
+        *,
+        requests_per_second: float = 2.5,
+        max_retries: int = 8,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         try:
             from notion_client import Client
             from notion_to_md import NotionToMarkdown
         except ImportError as error:
             raise RuntimeError("Reinstall notion-mount to restore its Notion dependencies") from error
         self.client = Client(auth=token)
-        # Child pages are synchronized as independent filesystem documents, so
-        # they must not also be embedded into their parent's Markdown body.
         self.converter = NotionToMarkdown(
             self.client,
             config={"parse_child_pages": False, "convert_images_to_base64": False},
         )
+        self.requests_per_second = requests_per_second
+        self.max_retries = max_retries
+        self._sleep = sleep
+        self._clock = clock
+        self._last_request_at: float | None = None
+        self._progress: Callable[[SyncProgress], None] | None = None
+        self._scan_count = 0
 
     def scan(
         self,
         root_page_id: str,
         progress: Callable[[SyncProgress], None] | None = None,
-    ) -> list[RemoteDocumentMetadata]:
-        """Collect the remote inventory without converting page bodies."""
-        root = self._retrieve(root_page_id)
-        documents: list[RemoteDocumentMetadata] = []
+    ) -> Iterator[RemoteDocumentMetadata]:
+        """Yield metadata as the hierarchy is discovered."""
         self._progress = progress
         self._scan_count = 0
+        root = self._retrieve(root_page_id)
         if root["object"] == "page":
             root_name = self._title(root)
-            documents.append(self._page(root, ()))
-            self._scan_blocks(root["id"], (root_name,), documents)
+            yield self._page(root, ())
+            yield from self._scan_blocks(root["id"], (root_name,))
         else:
-            self._scan_database(root, (self._title(root),), documents)
-        return documents
+            yield from self._scan_database(root, (self._title(root),))
+
+    def _report(self, event: SyncProgress) -> None:
+        if self._progress:
+            self._progress(event)
 
     def _report_scan(self, name: str) -> None:
-        progress = getattr(self, "_progress", None)
-        if progress:
-            self._scan_count = getattr(self, "_scan_count", 0) + 1
-            progress(SyncProgress("scan", self._scan_count, name=name))
+        self._scan_count += 1
+        self._report(SyncProgress("scan", self._scan_count, name=name))
 
     def _retrieve(self, object_id: str) -> dict[str, Any]:
         try:
-            return self.client.pages.retrieve(page_id=object_id)
+            return self._request(self.client.pages.retrieve, page_id=object_id)
         except Exception as page_error:
+            # A root database is not retrievable through the page endpoint. Do
+            # not fall back for transient failures such as an exhausted 429,
+            # because that would duplicate load and obscure the real error.
+            code = getattr(page_error, "code", None)
+            if code not in {"object_not_found", "validation_error"}:
+                raise
             try:
-                return self.client.databases.retrieve(database_id=object_id)
+                return self._request(self.client.databases.retrieve, database_id=object_id)
             except Exception:
                 raise page_error
 
     def _scan_blocks(
-        self, parent_id: str, ancestors: tuple[str, ...], output: list[RemoteDocumentMetadata]
-    ) -> None:
+        self, parent_id: str, ancestors: tuple[str, ...]
+    ) -> Iterator[RemoteDocumentMetadata]:
         for block in self._paginate(self.client.blocks.children.list, block_id=parent_id):
             block_type = block.get("type")
             if block_type == "child_page":
-                page = self.client.pages.retrieve(page_id=block["id"])
-                output.append(self._page(page, ancestors))
-                self._scan_blocks(page["id"], (*ancestors, self._title(page)), output)
+                page = self._request(self.client.pages.retrieve, page_id=block["id"])
+                yield self._page(page, ancestors)
+                yield from self._scan_blocks(page["id"], (*ancestors, self._title(page)))
             elif block_type == "child_database":
-                database = self.client.databases.retrieve(database_id=block["id"])
-                self._scan_database(database, (*ancestors, self._title(database)), output)
+                database = self._request(
+                    self.client.databases.retrieve, database_id=block["id"]
+                )
+                yield from self._scan_database(
+                    database, (*ancestors, self._title(database))
+                )
             elif block.get("has_children"):
-                # Structural blocks such as columns, toggles, and synced blocks
-                # can contain child pages/databases. They do not create a
-                # filesystem level, but their descendants must still be found.
-                self._scan_blocks(block["id"], ancestors, output)
+                # Layout blocks do not create a filesystem level, but pages and
+                # databases nested inside them remain structural descendants.
+                yield from self._scan_blocks(block["id"], ancestors)
 
     def _scan_database(
-        self, database: dict[str, Any], ancestors: tuple[str, ...], output: list[RemoteDocumentMetadata]
-    ) -> None:
-        # Notion API 2025-09-03 moved database queries to data sources. Keep
-        # compatibility with both notion-client generations.
+        self, database: dict[str, Any], ancestors: tuple[str, ...]
+    ) -> Iterator[RemoteDocumentMetadata]:
         query = getattr(self.client.databases, "query", None)
         if query is not None:
             pages = self._paginate(query, database_id=database["id"])
@@ -96,8 +114,8 @@ class NotionClientBackend:
                 )
             )
         for page in pages:
-            output.append(self._page(page, ancestors))
-            self._scan_blocks(page["id"], (*ancestors, self._title(page)), output)
+            yield self._page(page, ancestors)
+            yield from self._scan_blocks(page["id"], (*ancestors, self._title(page)))
 
     def _page(self, page: dict[str, Any], ancestors: tuple[str, ...]) -> RemoteDocumentMetadata:
         name = self._title(page)
@@ -113,11 +131,63 @@ class NotionClientBackend:
 
     def fetch_markdown(self, notion_id: str) -> str:
         """Fetch and convert one changed page body."""
-        return self._blocks_to_markdown(notion_id)
+        # notion-to-md-py calls the SDK client directly. Temporarily wrap the
+        # endpoint so its paginated block requests use the same limiter/retries.
+        endpoint = self.client.blocks.children
+        original = endpoint.list
 
-    def _blocks_to_markdown(self, page_id: str) -> str:
-        blocks = self.converter.page_to_markdown(page_id)
+        def limited_list(**kwargs: Any) -> dict[str, Any]:
+            return self._request(original, **kwargs)
+
+        endpoint.list = limited_list
+        try:
+            blocks = self.converter.page_to_markdown(notion_id)
+        finally:
+            endpoint.list = original
         return self.converter.to_markdown_string(blocks).get("parent", "").strip()
+
+    def _request(self, method: Any, **kwargs: Any) -> Any:
+        """Apply a global request pace and retry transient API failures."""
+        for attempt in range(self.max_retries + 1):
+            self._throttle()
+            try:
+                return method(**kwargs)
+            except Exception as error:
+                retry_after = self._retry_delay(error, attempt)
+                if retry_after is None or attempt >= self.max_retries:
+                    raise
+                self._report(
+                    SyncProgress(
+                        "retry", attempt + 1, self.max_retries,
+                        f"rate limited; retrying in {retry_after:.1f}s",
+                    )
+                )
+                self._sleep(retry_after)
+        raise RuntimeError("unreachable")
+
+    def _throttle(self) -> None:
+        if self.requests_per_second <= 0:
+            return
+        interval = 1.0 / self.requests_per_second
+        now = self._clock()
+        if self._last_request_at is not None:
+            remaining = interval - (now - self._last_request_at)
+            if remaining > 0:
+                self._sleep(remaining)
+        self._last_request_at = self._clock()
+
+    @staticmethod
+    def _retry_delay(error: Exception, attempt: int) -> float | None:
+        response = getattr(error, "response", None)
+        status = getattr(response, "status_code", None)
+        code = getattr(error, "code", None)
+        if status not in {429, 500, 502, 503, 504} and code != "rate_limited":
+            return None
+        retry_after = response.headers.get("retry-after") if response is not None else None
+        try:
+            return max(float(retry_after), 0.1) if retry_after else min(2**attempt, 30) + random.random()
+        except (TypeError, ValueError):
+            return min(2**attempt, 30) + random.random()
 
     @staticmethod
     def _rich_text(items: list[dict[str, Any]]) -> str:
@@ -138,14 +208,13 @@ class NotionClientBackend:
             if kind == "title":
                 continue
             value = prop.get(kind)
-            if kind in {"rich_text"}:
+            if kind == "rich_text":
                 value = self._rich_text(value or [])
             elif kind in {"select", "status"}:
                 value = value.get("name") if value else None
             elif kind == "multi_select":
                 value = ", ".join(item["name"] for item in value or [])
             elif kind in {"people", "files", "relation", "rollup", "formula"}:
-                # Complex values remain deterministic and human-readable.
                 value = str(value)
             elif kind == "date" and value:
                 value = value.get("start")
@@ -158,11 +227,12 @@ class NotionClientBackend:
         kind = parent.get("type")
         return parent.get(kind) if kind else None
 
-    @staticmethod
-    def _paginate(method: Any, **kwargs: Any) -> Iterator[dict[str, Any]]:
+    def _paginate(self, method: Any, **kwargs: Any) -> Iterator[dict[str, Any]]:
         cursor = None
         while True:
-            response = method(**kwargs, **({"start_cursor": cursor} if cursor else {}))
+            response = self._request(
+                method, **kwargs, **({"start_cursor": cursor} if cursor else {})
+            )
             yield from response.get("results", [])
             if not response.get("has_more"):
                 return

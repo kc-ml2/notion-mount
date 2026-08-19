@@ -139,17 +139,20 @@ notion-mount --workspace ./notion-workspace sync
 
 ## Synchronization model
 
-Every `sync` runs in three internal phases:
+Every `sync` streams the hierarchy incrementally:
 
 ```text
-1. Scan   → collect hierarchy and page metadata
-2. Plan   → compare the remote inventory with SQLite state
-3. Apply  → fetch and convert only added or modified page bodies
+Discover page metadata
+→ compare it with SQLite state
+→ fetch and commit the body when changed
+→ continue into that page's descendants
 ```
 
-The CLI reports discovered pages during scanning and shows `[current/total]` while fetching changed bodies. Each completed document is committed to SQLite immediately. If the process is interrupted with `Ctrl+C`, rerunning `notion-mount sync` skips completed documents and resumes the remaining work.
+The CLI continuously replaces one progress line with the current page name. Each completed document is committed to SQLite immediately. If the process is interrupted with `Ctrl+C`, rerunning `notion-mount sync` skips completed documents and resumes expensive body conversion from the remaining work.
 
-The metadata scan still scales with the number of pages and database rows because a complete inventory is required to detect deletions. However, unchanged pages do not incur block downloads or `notion-to-md-py` conversion. The initial sync fetches every body because all discovered pages are new; subsequent syncs use `last_edited_time` and projected paths to select the work set.
+Requests are paced below Notion's average API limit. HTTP 429 and transient server responses honor `Retry-After` when present and use exponential backoff before retrying. A complete hierarchy traversal is still required to detect deletions, so local deletion is deferred until traversal finishes successfully. An interruption or exhausted retry can never interpret an incomplete scan as remote deletion.
+
+Hierarchy traversal still scales with the number of pages and database rows. However, unchanged pages do not incur body conversion, and changed pages are persisted as they are discovered instead of waiting for a complete upfront scan. The initial sync fetches every body because all discovered pages are new; subsequent syncs use `last_edited_time` and projected paths to select work.
 
 ## Read-only behavior
 
