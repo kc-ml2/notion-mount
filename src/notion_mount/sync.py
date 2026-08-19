@@ -116,8 +116,8 @@ class SyncEngine:
         ):
             result.unchanged += 1
         else:
-            self._apply(document, path, path_string, old)
-            previous[document.notion_id] = self.state.all()[document.notion_id]
+            state = self._apply(document, path, path_string, old)
+            previous[document.notion_id] = state
             change_type = ChangeType.MODIFIED if old else ChangeType.ADDED
             change = DocumentChange(document.notion_id, f"/{path_string}", change_type)
             (result.modified if old else result.added).append(change)
@@ -166,7 +166,7 @@ class SyncEngine:
         path: PurePosixPath,
         path_string: str,
         old: DocumentState | None,
-    ) -> None:
+    ) -> DocumentState:
         body = self.backend.fetch_markdown(document.notion_id)
         content = render_markdown(
             notion_id=document.notion_id,
@@ -179,15 +179,15 @@ class SyncEngine:
         self.storage.write(path, content)
         if old and old.local_path != path_string:
             self.storage.delete(old.local_path)
-        self.state.upsert(
-            DocumentState(
-                notion_id=document.notion_id,
-                parent_id=document.parent_id,
-                name=document.name,
-                local_path=path_string,
-                last_edited_time=document.last_edited_time,
-                content_hash=digest,
-                sync_time=datetime.now(UTC).isoformat(),
-            )
+        state = DocumentState(
+            notion_id=document.notion_id,
+            parent_id=document.parent_id,
+            name=document.name,
+            local_path=path_string,
+            last_edited_time=document.last_edited_time,
+            content_hash=digest,
+            sync_time=datetime.now(UTC).isoformat(),
         )
+        self.state.upsert(state)
         self.state.commit()
+        return state

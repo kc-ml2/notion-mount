@@ -54,6 +54,25 @@ def test_cursorless_tasks_are_deduplicated(tmp_path: Path) -> None:
         assert state.pending_task_count("root") == 1
 
 
+def test_changed_documents_do_not_reload_the_full_state_table(tmp_path: Path) -> None:
+    backend = CheckpointBackend()
+    backend.fail_second = False
+    with StateStore(tmp_path / ".notion-mount/state.db") as state:
+        calls = 0
+        original_all = state.all
+
+        def counted_all():
+            nonlocal calls
+            calls += 1
+            return original_all()
+
+        state.all = counted_all  # type: ignore[method-assign]
+        SyncEngine(backend, state, LocalStorage(tmp_path)).sync("root")
+
+        assert calls == 1
+        assert len(state.all()) == 2
+
+
 def test_timeout_resumes_from_persisted_task_instead_of_root(tmp_path: Path) -> None:
     backend = CheckpointBackend()
     with StateStore(tmp_path / ".notion-mount/state.db") as state:
