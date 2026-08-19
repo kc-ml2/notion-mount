@@ -125,7 +125,7 @@ def test_interrupted_sync_commits_completed_pages_and_resumes(tmp_path: Path) ->
         engine = SyncEngine(backend, state, LocalStorage(tmp_path))
 
         def interrupt(progress: SyncProgress) -> None:
-            if progress.phase == "fetch" and progress.current == 2:
+            if progress.phase == "fetch" and progress.current == 1:
                 raise KeyboardInterrupt
 
         try:
@@ -181,6 +181,36 @@ def test_interrupted_scan_never_deletes_unseen_documents(tmp_path: Path) -> None
         assert set(state.all()) == {"page-1", "page-2"}
         assert (tmp_path / "Projects/Restored Arbiter.md").exists()
         assert (tmp_path / "Projects/Chatbot.md").exists()
+
+
+def test_duplicate_paths_remain_stable_when_traversal_order_changes(tmp_path: Path) -> None:
+    other = RemoteDocumentMetadata(
+        notion_id="different-page",
+        parent_id="db-1",
+        name="Arbiter",
+        last_edited_time="2026-01-01T00:00:00Z",
+        ancestors=("Projects",),
+    )
+    backend = FakeBackend(
+        [document(), other], {"page-1": "First", "different-page": "Other"}
+    )
+    with StateStore(tmp_path / ".notion-mount/state.db") as state:
+        engine = SyncEngine(backend, state, LocalStorage(tmp_path))
+        engine.sync("root")
+        original = {
+            notion_id: item.local_path for notion_id, item in state.all().items()
+        }
+        backend.documents = [other, document()]
+        backend.fetches.clear()
+
+        result = engine.sync("root")
+
+        assert not result.changed
+        assert result.unchanged == 2
+        assert backend.fetches == []
+        assert {
+            notion_id: item.local_path for notion_id, item in state.all().items()
+        } == original
 
 
 def test_duplicate_paths_are_disambiguated(tmp_path: Path) -> None:
