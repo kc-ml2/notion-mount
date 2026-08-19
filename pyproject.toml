@@ -12,6 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "notion-mount contributors" }]
 keywords = ["notion", "markdown", "filesystem", "fuse", "sync"]
 dependencies = [
+    "httpx>=0.23,<1",
     "notion-client>=2.2,<3",
     "notion-to-md-py>=0.1.5,<0.2",
 ]

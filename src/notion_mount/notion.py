@@ -5,6 +5,9 @@ import time
 from collections.abc import Callable, Iterator
 from typing import Any
 
+import httpx
+from notion_client.errors import RequestTimeoutError
+
 from .models import (
     RemoteDocumentMetadata,
     SyncProgress,
@@ -287,14 +290,10 @@ class NotionClientBackend:
 
     @staticmethod
     def _retry_delay(error: Exception, attempt: int) -> float | None:
-        # Timeouts and connection/transport failures have no HTTP response but
-        # are transient and safe to retry. Validation and auth errors are not.
-        error_name = error.__class__.__name__.lower()
-        transient_name = any(
-            marker in error_name
-            for marker in ("timeout", "connect", "network", "protocol", "readerror", "writeerror")
-        )
-        if transient_name or "timed out" in str(error).lower():
+        # notion-client wraps its own timeout, while all native httpx timeout,
+        # network, proxy, protocol, read/write, and close failures derive from
+        # TransportError. Validation and authentication errors do not.
+        if isinstance(error, (RequestTimeoutError, httpx.TransportError)):
             return NotionClientBackend._backoff(attempt)
         response = getattr(error, "response", None)
         status = getattr(response, "status_code", None)

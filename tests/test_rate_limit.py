@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import httpx
+import pytest
+from notion_client.errors import RequestTimeoutError
+
 from notion_mount.notion import NotionClientBackend
-
-
-class RequestTimeout(Exception):
-    pass
 
 
 class RateLimitError(Exception):
@@ -46,7 +46,7 @@ def test_request_retries_rate_limit_using_retry_after() -> None:
     assert sleeps == [1.5]
 
 
-def test_request_retries_timeout_without_an_http_response() -> None:
+def test_request_retries_notion_client_timeout_without_an_http_response() -> None:
     sleeps: list[float] = []
     notion = backend(sleeps)
     calls = 0
@@ -55,7 +55,35 @@ def test_request_retries_timeout_without_an_http_response() -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
-            raise RequestTimeout("Request timed out")
+            raise RequestTimeoutError()
+        return {"ok": True}
+
+    assert notion._request(request) == {"ok": True}
+    assert calls == 2
+    assert len(sleeps) == 1
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [
+        httpx.ConnectError,
+        httpx.ReadError,
+        httpx.WriteError,
+        httpx.RemoteProtocolError,
+        httpx.ProxyError,
+        httpx.CloseError,
+    ],
+)
+def test_all_httpx_transport_errors_are_retried(error_type) -> None:
+    sleeps: list[float] = []
+    notion = backend(sleeps)
+    calls = 0
+
+    def request() -> dict[str, bool]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise error_type("transient transport failure")
         return {"ok": True}
 
     assert notion._request(request) == {"ok": True}
@@ -74,7 +102,7 @@ def test_retry_forever_continues_past_finite_retry_limit() -> None:
         nonlocal calls
         calls += 1
         if calls <= 3:
-            raise RequestTimeout("Request timed out")
+            raise RequestTimeoutError()
         return {"ok": True}
 
     assert notion._request(request) == {"ok": True}
